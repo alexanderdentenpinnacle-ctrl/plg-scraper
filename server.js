@@ -1,9 +1,13 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
+const smsRouter = require('./sms');
 
 const app = express();
 app.use(express.json());
+
+// GHL SMS listener (Phase 1: listen + log). Routes live under /sms.
+app.use('/sms', smsRouter);
 
 const PORT = process.env.PORT || 8080;
 const SECRET = process.env.SCRAPER_SECRET || '';
