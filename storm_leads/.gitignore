@@ -1,0 +1,6 @@
+data/raw/
+output/
+state/
+__pycache__/
+.pytest_cache/
+deploy/site/

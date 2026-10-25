@@ -1,0 +1,122 @@
+# Storm Impact -> Commercial Property List
+# All scope defaults live here. CLI flags (--days, --min-hail) override the matching keys.
+
+window_days: 90                 # look-back window from run date
+min_hail_in: 1.25               # SPC report / swath threshold (inches)
+mrms_mesh_threshold_mm: 32      # MRMS MESH threshold (1.25" ~= 32 mm)
+radar_only_radius_mi: 10        # swath with no SPC report within this distance -> radar_only_flag
+# If the MRMS file for a day is missing, buffer that day's SPC reports instead (0 disables)
+spc_point_fallback_buffer_mi: 1.0
+swath_simplify_deg: 0.005       # geometry simplification for the swath layer (~500 m)
+
+hurricane:
+  named_storms: ["ISAIAS"]      # always include these (matched against ATCF storm name)
+  include_other_us_landfalls: true
+  wind_zones_kt: [50, 64]       # zones used for parcel matching (34 kt is ignored)
+  basins: ["al", "ep", "cp"]
+  year: null                    # null = year(s) covered by the window
+
+# DOR use-code ranges. 010 (vacant commercial) and 040 (vacant industrial) are excluded
+# because the scope says "no vacant land". Set exclude_vacant: false to keep them.
+land_use:
+  fl_commercial: ["010", "039"]
+  fl_industrial: ["040", "049"]
+  exclude_vacant: true
+  fl_vacant_codes: ["010", "040"]
+
+# Phase 1 parcel sources. Each county is one source.
+#   type: arcgis  -> ArcGIS REST FeatureServer/MapServer layer; only the storm-footprint bbox is queried
+#   type: file    -> local or downloadable shapefile/GeoPackage/GeoJSON (zip ok), optionally joined to a NAL CSV
+# `fields` maps our output field -> the source's column name.
+# NOTE: URLs could not be verified from the build sandbox (network policy). Run
+#   python run.py --check-sources
+# on a machine with normal internet to confirm each one before the first full run.
+parcels:
+  florida_statewide: &fl_statewide
+    type: arcgis
+    # Florida Statewide Cadastral (FDOR NAL attributes on parcel polygons), hosted by FGIO/FDEP.
+    url: "https://services9.arcgis.com/Gh9awoU677aKree0/arcgis/rest/services/Florida_Statewide_Cadastral/FeatureServer/0"
+    use_code_type: fl_dor
+    fields: &fl_fields
+      parcel_id: PARCEL_ID
+      county_no: CO_NO
+      land_use_code: DOR_UC
+      situs_address: PHY_ADDR1
+      city: PHY_CITY
+      zip: PHY_ZIPCD
+      building_sqft: TOT_LVG_AREA
+      year_built: ACT_YR_BLT
+      market_value: JV
+      owner_name: OWN_NAME
+      owner_addr1: OWN_ADDR1
+      owner_addr2: OWN_ADDR2
+      owner_city: OWN_CITY
+      owner_state: OWN_STATE
+      owner_zip: OWN_ZIPCD
+
+  counties:
+    - {name: Escambia,   state: FL, dor_county_no: 27, source: florida_statewide}
+    - {name: Okaloosa,   state: FL, dor_county_no: 56, source: florida_statewide}
+    - {name: Santa Rosa, state: FL, dor_county_no: 67, source: florida_statewide}
+    - {name: Walton,     state: FL, dor_county_no: 76, source: florida_statewide}
+    # Alternative per-county FL source: DOR NAL CSV + DOR parcel shapefile (from the DOR data portal).
+    # Drop the files in data/raw/parcels/<county>/ and switch the county to:
+    #   source: {type: file, geometry: "data/raw/parcels/okaloosa/*.shp", nal_csv: "data/raw/parcels/okaloosa/NAL*.csv",
+    #            join_key: PARCEL_ID, use_code_type: fl_dor, fields: *fl_fields}
+    - name: Baldwin
+      state: AL
+      source:
+        type: arcgis
+        url: null            # TODO: Baldwin County GIS parcel layer URL (ArcGIS REST .../MapServer/<n>)
+        use_code_type: keyword
+        fields:
+          parcel_id: PIN
+          land_use_code: LAND_USE
+          land_use_desc: LAND_USE_DESC
+          situs_address: SITE_ADDR
+          city: SITE_CITY
+          zip: SITE_ZIP
+          building_sqft: BLDG_SQFT
+          year_built: YR_BUILT
+          market_value: APPRAISED_VALUE
+          owner_name: OWNER
+          owner_addr1: MAIL_ADDR1
+          owner_city: MAIL_CITY
+          owner_state: MAIL_STATE
+          owner_zip: MAIL_ZIP
+    - name: Mobile
+      state: AL
+      source:
+        type: arcgis
+        url: null            # TODO: Mobile County Revenue Commission parcel layer URL
+        use_code_type: keyword
+        fields:
+          parcel_id: PIN
+          land_use_code: LAND_USE
+          land_use_desc: LAND_USE_DESC
+          situs_address: SITE_ADDR
+          city: SITE_CITY
+          zip: SITE_ZIP
+          building_sqft: BLDG_SQFT
+          year_built: YR_BUILT
+          market_value: APPRAISED_VALUE
+          owner_name: OWNER
+          owner_addr1: MAIL_ADDR1
+          owner_city: MAIL_CITY
+          owner_state: MAIL_STATE
+          owner_zip: MAIL_ZIP
+
+# Keyword classifier for counties without DOR codes (AL). Checked against code + description, upper-cased.
+keyword_land_use:
+  include: [COMMERCIAL, COMM, INDUSTRIAL, INDUST, OFFICE, RETAIL, STORE, WAREHOUSE, HOTEL, MOTEL,
+            RESTAURANT, SHOPPING, BANK, SERVICE STATION, MANUFACTUR, MINI STORAGE, STORAGE, MARINA, CLASS 2, CLASS II]
+  exclude: [VACANT, RESIDENTIAL, SINGLE FAMILY, CONDO, MOBILE HOME, AGRICULT, TIMBER, EXEMPT, CLASS 3, CLASS III]
+
+map:
+  include_owner_in_popup: true   # set false before publishing the map anywhere public
+  max_markers: 20000
+
+# Phase 2 (national hail via Regrid). Not built yet -- needs an API key.
+regrid:
+  enabled: false
+  api_key_env: REGRID_API_KEY

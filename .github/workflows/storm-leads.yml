@@ -1,0 +1,106 @@
+name: Storm leads (weekly)
+
+on:
+  schedule:
+    - cron: "17 11 * * 1"   # Mondays 11:17 UTC (6:17 AM Central)
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Look-back window (days)"
+        default: "90"
+      min_hail:
+        description: "Min hail size (inches)"
+        default: "1.25"
+      mark_pushed:
+        description: "Only mark the current ghl_import.csv rows as pushed to GHL (no new fetch)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency: storm-leads
+
+# This repo is PUBLIC, so lead data (owner names/addresses) is never committed and is only
+# uploaded encrypted. Secret STORM_LEADS_PASSPHRASE is required. To read the results:
+#   gpg -d storm-leads.tar.gz.gpg | tar xz
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: storm_leads
+    env:
+      PASSPHRASE: ${{ secrets.STORM_LEADS_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require passphrase
+        run: |
+          if [ -z "$PASSPHRASE" ]; then
+            echo "::error::Add the STORM_LEADS_PASSPHRASE repo secret (Settings > Secrets and variables > Actions)."; exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: storm_leads/requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      # Public storm/parcel downloads: plain cache is fine (reruns stay cheap)
+      - uses: actions/cache@v4
+        with:
+          path: storm_leads/data/raw
+          key: storm-raw-${{ github.run_id }}
+          restore-keys: storm-raw-
+
+      # Previous run's ledger + cumulative CSV (encrypted artifact, 90-day retention)
+      - name: Fetch previous state
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          workflow: storm-leads.yml
+          name: storm-leads-state
+          path: storm_leads/prev
+          workflow_conclusion: success
+          if_no_artifact_found: warn
+
+      - name: Restore previous state
+        run: |
+          if [ -f prev/storm-leads.tar.gz.gpg ]; then
+            gpg --batch --yes --passphrase "$PASSPHRASE" -d prev/storm-leads.tar.gz.gpg | tar xz
+            echo "Restored ledger with $(($(wc -l < state/ledger.csv) - 1)) rows"
+          else
+            echo "No previous state - first run"
+          fi
+
+      - name: Mark pushed to GHL
+        if: inputs.mark_pushed
+        run: python run.py --mark-pushed
+
+      - name: Run pipeline
+        if: ${{ !inputs.mark_pushed }}
+        run: python run.py --days "${{ inputs.days || '90' }}" --min-hail "${{ inputs.min_hail || '1.25' }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          { echo '```'; cat output/run_report.txt 2>/dev/null || echo "no report"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Encrypt outputs
+        run: |
+          tar czf - state output | gpg --batch --yes --symmetric --cipher-algo AES256 \
+            --passphrase "$PASSPHRASE" -o storm-leads.tar.gz.gpg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: storm-leads-state
+          path: storm_leads/storm-leads.tar.gz.gpg
+          retention-days: 90
+
+      - name: Tests
+        run: python -m pytest -q
