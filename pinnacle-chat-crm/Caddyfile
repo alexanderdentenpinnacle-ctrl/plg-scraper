@@ -1,0 +1,22 @@
+# Automatic HTTPS for all four subdomains.
+
+chat.{$DOMAIN} {
+	reverse_proxy element:80
+}
+
+matrix.{$DOMAIN} {
+	reverse_proxy synapse:8008
+}
+
+crm.{$DOMAIN} {
+	# Let the chat app embed the CRM as a room tab, and nothing else.
+	header Content-Security-Policy "frame-ancestors 'self' https://chat.{$DOMAIN}"
+	reverse_proxy twenty-server:3000 {
+		header_down -X-Frame-Options
+		header_down -Content-Security-Policy
+	}
+}
+
+hooks.{$DOMAIN} {
+	reverse_proxy bridge:8080
+}

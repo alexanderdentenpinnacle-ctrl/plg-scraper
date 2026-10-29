@@ -1,0 +1,37 @@
+server_name: "matrix.__DOMAIN__"
+pid_file: /data/homeserver.pid
+public_baseurl: "https://matrix.__DOMAIN__/"
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    resources:
+      - names: [client]
+        compress: false
+
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: "__SYNAPSE_DB_PASSWORD__"
+    database: synapse
+    host: synapse-db
+    cp_min: 5
+    cp_max: 10
+
+log_config: "/data/matrix.__DOMAIN__.log.config"
+media_store_path: /data/media_store
+signing_key_path: "/data/matrix.__DOMAIN__.signing.key"
+
+# Private team server: no public sign-ups, no talking to other Matrix servers.
+enable_registration: false
+registration_shared_secret: "__SYNAPSE_REGISTRATION_SECRET__"
+macaroon_secret_key: "__SYNAPSE_MACAROON_SECRET__"
+form_secret: "__SYNAPSE_FORM_SECRET__"
+federation_domain_whitelist: []
+trusted_key_servers: []
+suppress_key_server_warning: true
+report_stats: false
+max_upload_size: 50M
