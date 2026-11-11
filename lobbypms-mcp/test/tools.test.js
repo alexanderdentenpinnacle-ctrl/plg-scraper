@@ -89,11 +89,34 @@ test('write tools refuse when WRITE_ENABLED is off and say confirm in descriptio
   assert.match(r.content[0].text, /WRITE_ENABLED/);
 });
 
-test('write tools refuse unverified endpoints even with WRITE_ENABLED', async () => {
-  const f = fakeFetch({ 'GET /bookings/5': { data: detail(5) } });
-  const r = await callTool('check_in', { booking_id: 5 }, { ...env, WRITE_ENABLED: 'true' }, f);
-  assert.equal(r.isError, true);
-  assert.match(r.content[0].text, /not verified/);
+test('unsupported writes refuse with a dashboard-only message even with WRITE_ENABLED', async () => {
+  for (const [tool, args] of [['check_in', { booking_id: 5 }], ['check_out', { booking_id: 5 }], ['cancel_booking', { booking_id: 5 }]]) {
+    const calls = [];
+    const f = fakeFetch({ 'GET /bookings/5': { data: detail(5) } }, calls);
+    const r = await callTool(tool, args, { ...env, WRITE_ENABLED: 'true' }, f);
+    assert.equal(r.isError, true, tool);
+    assert.match(r.content[0].text, /Dashboard-only/, tool);
+    assert.ok(calls.every((c) => c.method === 'GET'), `${tool} must not send a write`);
+  }
+});
+
+test('create_booking sends the verified POST /bookings body and reads back the new id', async () => {
+  const calls = [];
+  const f = fakeFetch({
+    'GET /available-rooms': { data: [avail('2026-11-15', 6)] },
+    'POST /bookings': { booking: { booking_id: 77, room_id: 953627 } },
+    'GET /bookings/77': { data: detail(77) },
+  }, calls);
+  const r = parse(await callTool('create_booking', {
+    category_id: 53737, start_date: '2026-11-15', end_date: '2026-11-16', guests: 1,
+    client: { name: 'Test Guest', email: 't@example.com' }, note: 'Hostelworld 1-2',
+  }, { ...env, WRITE_ENABLED: 'true' }, f));
+  const post = calls.find((c) => c.method === 'POST');
+  assert.deepEqual(JSON.parse(post.body), {
+    category_id: 53737, start_date: '2026-11-15', end_date: '2026-11-16', total_adults: 1,
+    holder_name: 'Test Guest', note: 'Hostelworld 1-2 | Contact: t@example.com',
+  });
+  assert.deepEqual(r.created, [77]);
 });
 
 const hwArgs = {
@@ -140,18 +163,19 @@ test('import_hostelworld_booking creates linked bookings when enabled (no group 
     'GET /bookings': { data: [], meta: { total_pages: 1 } },
     'GET /available-rooms': { data: [avail('2026-11-15', 6)] },
     'GET /rooms': rooms,
-    'POST /bookings': () => ({ data: { booking_id: ++n } }),
+    'POST /bookings': () => ({ booking: { booking_id: ++n, room_id: 953627 } }),
     'GET /bookings/101': { data: detail(101) }, 'GET /bookings/102': { data: detail(102) },
   }, calls);
   const r = parse(await callTool('import_hostelworld_booking', { ...hwArgs, beds: 2, hw_total: 60, deposit: 9, dry_run: false },
-    { ...env, WRITE_ENABLED: 'true', ALLOW_UNVERIFIED_WRITES: 'true' }, f));
+    { ...env, WRITE_ENABLED: 'true' }, f));
   assert.equal(r.status, 'created');
   assert.deepEqual(r.created, [101, 102]);
   const posts = calls.filter((c) => c.method === 'POST').map((c) => JSON.parse(c.body));
   assert.equal(posts.length, 2);
-  assert.equal(posts[0].holder.name, 'Sarah Eger');
-  assert.equal(posts[0].holder.email, 's@example.com');
-  assert.equal(posts[0].channel, 'Hostelworld');
+  assert.equal(posts[0].holder_name, 'Sarah Eger');
+  assert.equal(posts[0].total_adults, 1);
+  assert.match(posts[0].note, /^Hostelworld 319555-581073359 .* Contact: s@example.com \| \+1 \| DE$/);
+  assert.equal(posts[0].channel, undefined);
 });
 
 test('client names with "(bed x/y)" are rejected', async () => {

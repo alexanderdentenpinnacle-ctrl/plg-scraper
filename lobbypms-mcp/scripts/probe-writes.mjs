@@ -1,3 +1,6 @@
+// SUPERSEDED 2026-11-11: the write map is done (API_NOTES.md). Only POST /bookings exists, with body
+// {category_id,start_date,end_date,total_adults,holder_name,note}, and the API cannot delete a booking,
+// so this script's cleanup step would fail and leave the test booking behind. Don't run it.
 // Write-endpoint discovery against the DEV worker only.
 // Usage: DEV_MCP_URL=https://lobbypms-mcp-dev.<sub>.workers.dev/mcp [MCP_AUTH_TOKEN=...] node scripts/probe-writes.mjs
 //

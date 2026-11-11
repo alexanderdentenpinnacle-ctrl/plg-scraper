@@ -66,7 +66,8 @@ async function runWrite(env, client, key, input) {
 }
 
 function extractBookingIds(resp) {
-  const d = resp?.data ?? resp;
+  // POST /bookings returns {"booking":{"booking_id":..,"room_id":..}}.
+  const d = resp?.booking ?? resp?.data ?? resp;
   const pick = (x) => x?.booking_id ?? x?.id_reserva ?? x?.id;
   if (Array.isArray(d)) return d.map(pick).filter(Boolean);
   if (Array.isArray(d?.bookings)) return d.bookings.map(pick).filter(Boolean);
@@ -186,7 +187,7 @@ export const TOOLS = [
   {
     name: 'create_booking',
     write: true,
-    description: `Create a booking after checking availability. ${CONFIRM}`,
+    description: `Create a booking after checking availability (POST /bookings, verified). One booking = one bed in dorms; Lobby auto-assigns the bed. Email/phone/country go into the note. ${CONFIRM}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -216,7 +217,7 @@ export const TOOLS = [
   {
     name: 'cancel_booking',
     write: true,
-    description: `Cancel a booking. ${CONFIRM}`,
+    description: `NOT AVAILABLE in the LobbyPMS API (dashboard-only); calling it returns where to do it in LobbyPMS. Cancel a booking. ${CONFIRM}`,
     inputSchema: { type: 'object', properties: { booking_id: int('Booking ID'), reason: str('Reason') }, required: ['booking_id'] },
     handler: async (a, ctx) => {
       await getBooking(ctx.client, a.booking_id);
@@ -227,7 +228,7 @@ export const TOOLS = [
   ...['check_in', 'check_out'].map((key) => ({
     name: key,
     write: true,
-    description: `${key === 'check_in' ? 'Check in' : 'Check out'} a booking. ${CONFIRM}`,
+    description: `NOT AVAILABLE in the LobbyPMS API (dashboard-only); calling it returns where to do it in LobbyPMS. ${key === 'check_in' ? 'Check in' : 'Check out'} a booking. ${CONFIRM}`,
     inputSchema: { type: 'object', properties: { booking_id: int('Booking ID') }, required: ['booking_id'] },
     handler: async (a, ctx) => {
       const b = await getBooking(ctx.client, a.booking_id);
@@ -240,7 +241,7 @@ export const TOOLS = [
   {
     name: 'add_payment',
     write: true,
-    description: `Record a payment (S/) on a booking. method is a payment method name (e.g. "Cash") or id. ${CONFIRM}`,
+    description: `NOT AVAILABLE in the LobbyPMS API (dashboard-only); calling it returns where to do it in LobbyPMS. Record a payment (S/) on a booking. method is a payment method name (e.g. "Cash") or id. ${CONFIRM}`,
     inputSchema: { type: 'object', properties: { booking_id: int('Booking ID'), amount: { type: 'number', description: 'Amount in PEN' }, method: str('Payment method name or id'), note: str('Note') }, required: ['booking_id', 'amount', 'method'] },
     handler: async (a, ctx) => {
       if (!(a.amount > 0)) throw new Error('amount must be > 0');
@@ -255,7 +256,7 @@ export const TOOLS = [
   {
     name: 'add_sale',
     write: true,
-    description: `Add a POS product/service to a booking. ${CONFIRM}`,
+    description: `NOT AVAILABLE in the LobbyPMS API (dashboard-only); calling it returns where to do it in LobbyPMS. Add a POS product/service to a booking. ${CONFIRM}`,
     inputSchema: { type: 'object', properties: { booking_id: int('Booking ID'), service_id: int('Product service_id'), quantity: int('Quantity') }, required: ['booking_id', 'service_id', 'quantity'] },
     handler: async (a, ctx) => {
       if (!(a.quantity >= 1)) throw new Error('quantity must be >= 1');
@@ -271,7 +272,7 @@ export const TOOLS = [
   {
     name: 'update_client',
     write: true,
-    description: `Update the client (holder) on a booking: name, email, phone, country, document. ${CONFIRM}`,
+    description: `NOT AVAILABLE in the LobbyPMS API (dashboard-only); calling it returns where to do it in LobbyPMS. Update the client (holder) on a booking: name, email, phone, country, document. ${CONFIRM}`,
     inputSchema: { type: 'object', properties: { booking_id: int('Booking ID'), fields: { type: 'object', additionalProperties: true } }, required: ['booking_id', 'fields'] },
     handler: async (a, ctx) => {
       const b = await getBooking(ctx.client, a.booking_id);
@@ -356,7 +357,7 @@ export async function importHostelworld(a, { env, client }) {
   };
 
   // Grouped only once group support is confirmed in the docs; otherwise linked bookings.
-  const groupReady = { ok: WRITE_ENDPOINTS.create_group_booking.verified };
+  const groupReady = { ok: WRITE_ENDPOINTS.create_group_booking.supported !== false && WRITE_ENDPOINTS.create_group_booking.verified };
   const base = {
     category_id: a.category_id, start_date: a.checkin, end_date: a.checkout,
     client: clientInfo, note, channel: 'Hostelworld', status: 'confirmada',
