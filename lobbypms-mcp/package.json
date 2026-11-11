@@ -1,0 +1,12 @@
+{
+  "name": "lobbypms-mcp",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "dev": "wrangler dev --env dev",
+    "deploy:dev": "wrangler deploy --env dev",
+    "deploy": "echo 'Production deploy requires confirmation from Alex. Run: npx wrangler deploy' && exit 1"
+  }
+}

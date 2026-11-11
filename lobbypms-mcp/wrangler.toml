@@ -1,0 +1,20 @@
+# Production worker: lobbypms-mcp.alexdenten.workers.dev
+# Secrets (never commit): npx wrangler secret put LOBBY_API_TOKEN   (optional: MCP_AUTH_TOKEN)
+name = "lobbypms-mcp"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+# Keep whatever base URL the current production worker uses.
+LOBBY_BASE_URL = "https://api.lobbypms.com/api/v1"
+WRITE_ENABLED = "false"          # flip to "true" only with Alex's confirmation
+ALLOW_UNVERIFIED_WRITES = "false"
+
+# Dev worker for write-endpoint discovery: lobbypms-mcp-dev.<subdomain>.workers.dev
+# Needs its own secret: npx wrangler secret put LOBBY_API_TOKEN --env dev
+[env.dev]
+name = "lobbypms-mcp-dev"
+[env.dev.vars]
+LOBBY_BASE_URL = "https://api.lobbypms.com/api/v1"
+WRITE_ENABLED = "true"
+ALLOW_UNVERIFIED_WRITES = "true"
