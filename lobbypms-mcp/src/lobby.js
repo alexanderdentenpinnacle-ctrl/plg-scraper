@@ -112,8 +112,9 @@ export function normalizeBookingDetail(d) {
     created_at: limaDateTime(d.fecha_creacion),
     checkin: limaDate(d.fecha_ingreso),
     checkout: limaDate(d.fecha_salida),
-    checked_in_at: d.checkin_realizado ? limaDateTime(d.checkin_realizado) : null,
-    checked_out_at: d.checkout_realizado ? limaDateTime(d.checkout_realizado) : null,
+    // Docs show 1/0 here; some responses carry a timestamp instead.
+    checked_in_at: d.checkin_realizado ? (typeof d.checkin_realizado === 'string' ? limaDateTime(d.checkin_realizado) : true) : null,
+    checked_out_at: d.checkout_realizado ? (typeof d.checkout_realizado === 'string' ? limaDateTime(d.checkout_realizado) : true) : null,
     category: d.categoria,
     room: d.cuarto,
     people: d.numero_personas,

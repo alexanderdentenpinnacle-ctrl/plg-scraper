@@ -2,7 +2,7 @@ import {
   addDays, assertYmd, flattenAvailability, getAllPages, nightsBetween,
   normalizeBookingDetail, summarizeListBooking, todayLima,
 } from './lobby.js';
-import { endpointReady, WRITE_ENDPOINTS } from './endpoints.js';
+import { CANCELLATION_REASONS, endpointReady, WRITE_ENDPOINTS } from './endpoints.js';
 
 const CONFIRM = 'Confirm with the user before calling.';
 const writesOn = (env) => env.WRITE_ENABLED === 'true';
@@ -71,6 +71,7 @@ function extractBookingIds(resp) {
   const pick = (x) => x?.booking_id ?? x?.id_reserva ?? x?.id;
   if (Array.isArray(d)) return d.map(pick).filter(Boolean);
   if (Array.isArray(d?.bookings)) return d.bookings.map(pick).filter(Boolean);
+  if (Array.isArray(d?.distributed) && d.distributed.length) return d.distributed.map(pick).filter(Boolean);
   const one = pick(d);
   return one ? [one] : [];
 }
@@ -177,6 +178,36 @@ export const TOOLS = [
     handler: (a, ctx) => dataQualityReport(a, ctx),
   },
   {
+    name: 'get_room_status',
+    description: 'Rooms grouped into checkin_today, checkout_today, in_house, no_guest (GET /rooms/status).',
+    inputSchema: { type: 'object', properties: {} },
+    handler: (_a, { client }) => client.get('/rooms/status'),
+  },
+  {
+    name: 'list_channels',
+    description: 'Sales channels (channel_id, name) for create_booking.channel_id (GET /channels).',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async (_a, { client }) => (await client.get('/channels'))?.channels ?? [],
+  },
+  {
+    name: 'list_rate_plans',
+    description: 'Rate plans enabled for the booking engine (GET /rate-plans).',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async (_a, { client }) => (await client.get('/rate-plans'))?.data ?? [],
+  },
+  {
+    name: 'list_document_types',
+    description: 'Guest document types (id, name) for create_client (GET /documents).',
+    inputSchema: { type: 'object', properties: {} },
+    handler: (_a, { client }) => client.get('/documents'),
+  },
+  {
+    name: 'list_payment_links',
+    description: 'Payment links for a booking (GET /payment/link).',
+    inputSchema: { type: 'object', properties: { booking_id: int('Booking ID'), status: { type: 'string', enum: ['OPEN', 'DELETED', 'EXPIRED', 'APROVED', 'REJECTED'] } }, required: ['booking_id'] },
+    handler: (a, { client }) => client.get('/payment/link', { booking_id: a.booking_id, status: a.status }),
+  },
+  {
     name: 'lobby_get',
     description: 'Raw read-only GET to any LobbyPMS path, for exploration.',
     inputSchema: { type: 'object', properties: { path: str('e.g. /bookings'), params: { type: 'object', additionalProperties: true } }, required: ['path'] },
@@ -187,14 +218,20 @@ export const TOOLS = [
   {
     name: 'create_booking',
     write: true,
-    description: `Create a booking after checking availability (POST /bookings, verified). One booking = one bed in dorms; Lobby auto-assigns the bed. Email/phone/country go into the note. ${CONFIRM}`,
+    description: `Create a booking after checking availability (POST /bookings). One booking = one bed in dorms; Lobby auto-assigns the bed (a stay that can't fit one bed comes back split into several bookings). Email/phone/country go into the note unless customer_document links an existing client. ${CONFIRM}`,
     inputSchema: {
       type: 'object',
       properties: {
-        category_id: int('Room category ID'), room_id: int('Specific bed/room ID (optional)'),
+        category_id: int('Room category ID'),
         start_date: date('Check-in'), end_date: date('Check-out'),
-        guests: int('Number of guests'), client: clientSchema,
-        note: str('Booking note'), channel: str('Channel/agency name (optional)'),
+        guests: int('Adults'), children: int('Children (optional)'), client: clientSchema,
+        customer_document: str('Existing client document number (optional; replaces holder name)'),
+        customer_nationality: str('ISO 3166-1 country code; required with customer_document'),
+        note: str('Booking note'),
+        channel_id: int('Sales channel id from list_channels (optional)'),
+        plan_id: int('Rate plan id from list_rate_plans (optional)'),
+        payment: { type: 'number', description: 'Amount already paid (optional, <= total)' },
+        rates_per_day: { type: 'array', items: { type: 'object', properties: { date: date('Night'), price: { type: 'number' } }, required: ['date', 'price'] }, description: 'Custom price per night (optional; exactly one per night)' },
       },
       required: ['category_id', 'start_date', 'end_date', 'guests', 'client'],
     },
@@ -203,6 +240,13 @@ export const TOOLS = [
       if (nightsBetween(a.start_date, a.end_date) < 1) throw new Error('end_date must be after start_date');
       if (!(a.guests >= 1)) throw new Error('guests must be >= 1');
       validateClient(a.client);
+      if (a.customer_document && !a.customer_nationality) throw new Error('customer_nationality is required with customer_document');
+      if (a.rates_per_day) {
+        const nights = [];
+        for (let d = a.start_date; d < a.end_date; d = addDays(d, 1)) nights.push(d);
+        const got = a.rates_per_day.map((r) => r.date).sort();
+        if (JSON.stringify(got) !== JSON.stringify(nights)) throw new Error(`rates_per_day needs exactly one entry per night: ${nights.join(', ')}`);
+      }
       const avail = await nightsAvailability(client, a.start_date, a.end_date);
       for (let d = a.start_date; d < a.end_date; d = addDays(d, 1)) {
         const c = avail[d]?.[a.category_id];
@@ -217,10 +261,17 @@ export const TOOLS = [
   {
     name: 'cancel_booking',
     write: true,
-    description: `NOT AVAILABLE in the LobbyPMS API (dashboard-only); calling it returns where to do it in LobbyPMS. Cancel a booking. ${CONFIRM}`,
-    inputSchema: { type: 'object', properties: { booking_id: int('Booking ID'), reason: str('Reason') }, required: ['booking_id'] },
+    description: `Cancel a booking (POST /cancel-booking/{id}). LobbyPMS only allows this for bookings created through the API, not checked in, with no payments or extra charges; cancel others in LobbyPMS. reason_code: ${Object.entries(CANCELLATION_REASONS).map(([k, v]) => `${k}=${v}`).join(', ')}. ${CONFIRM}`,
+    inputSchema: {
+      type: 'object',
+      properties: { booking_id: int('Booking ID'), reason_code: { type: 'string', enum: Object.keys(CANCELLATION_REASONS) }, description: str('Optional detail') },
+      required: ['booking_id', 'reason_code'],
+    },
     handler: async (a, ctx) => {
-      await getBooking(ctx.client, a.booking_id);
+      if (!CANCELLATION_REASONS[a.reason_code]) throw new Error(`reason_code must be one of ${Object.keys(CANCELLATION_REASONS).join(', ')}`);
+      const b = await getBooking(ctx.client, a.booking_id);
+      if (b.checked_in_at) throw new Error('Booking is already checked in; LobbyPMS will refuse the cancellation. Cancel it in LobbyPMS.');
+      if ((b.payments || []).length || (b.sales || []).length) throw new Error('Booking has payments or charges; LobbyPMS will refuse the cancellation. Cancel it in LobbyPMS.');
       const resp = await runWrite(ctx.env, ctx.client, 'cancel_booking', a);
       return { result: resp, booking: await getBooking(ctx.client, a.booking_id).catch(() => 'deleted') };
     },
@@ -241,7 +292,7 @@ export const TOOLS = [
   {
     name: 'add_payment',
     write: true,
-    description: `NOT AVAILABLE in the LobbyPMS API (dashboard-only); calling it returns where to do it in LobbyPMS. Record a payment (S/) on a booking. method is a payment method name (e.g. "Cash") or id. ${CONFIRM}`,
+    description: `NOT AVAILABLE in the LobbyPMS API: record payments in LobbyPMS. Alternatives: pass payment to create_booking, or send create_payment_link. Record a payment (S/) on a booking. method is a payment method name (e.g. "Cash") or id. ${CONFIRM}`,
     inputSchema: { type: 'object', properties: { booking_id: int('Booking ID'), amount: { type: 'number', description: 'Amount in PEN' }, method: str('Payment method name or id'), note: str('Note') }, required: ['booking_id', 'amount', 'method'] },
     handler: async (a, ctx) => {
       if (!(a.amount > 0)) throw new Error('amount must be > 0');
@@ -256,8 +307,8 @@ export const TOOLS = [
   {
     name: 'add_sale',
     write: true,
-    description: `NOT AVAILABLE in the LobbyPMS API (dashboard-only); calling it returns where to do it in LobbyPMS. Add a POS product/service to a booking. ${CONFIRM}`,
-    inputSchema: { type: 'object', properties: { booking_id: int('Booking ID'), service_id: int('Product service_id'), quantity: int('Quantity') }, required: ['booking_id', 'service_id', 'quantity'] },
+    description: `Add a product/service charge to a booking (POST /booking/add-product-service). ${CONFIRM}`,
+    inputSchema: { type: 'object', properties: { booking_id: int('Booking ID'), service_id: int('Product service_id from list_products'), quantity: int('Quantity'), inventory_center_id: int('Inventory center (optional)') }, required: ['booking_id', 'service_id', 'quantity'] },
     handler: async (a, ctx) => {
       if (!(a.quantity >= 1)) throw new Error('quantity must be >= 1');
       await getBooking(ctx.client, a.booking_id);
@@ -265,14 +316,14 @@ export const TOOLS = [
       const p = products.find((x) => String(x.service_id) === String(a.service_id));
       if (!p) throw new Error(`Unknown service_id ${a.service_id}`);
       if (!p.infinite_inventory && p.stock !== null && p.stock < a.quantity) throw new Error(`Only ${p.stock} ${p.name} in stock`);
-      await runWrite(ctx.env, ctx.client, 'add_sale', a);
-      return getBooking(ctx.client, a.booking_id);
+      const resp = await runWrite(ctx.env, ctx.client, 'add_sale', a);
+      return { sale: resp?.sale ?? resp, booking: await getBooking(ctx.client, a.booking_id) };
     },
   },
   {
     name: 'update_client',
     write: true,
-    description: `NOT AVAILABLE in the LobbyPMS API (dashboard-only); calling it returns where to do it in LobbyPMS. Update the client (holder) on a booking: name, email, phone, country, document. ${CONFIRM}`,
+    description: `NOT AVAILABLE in the LobbyPMS API: edit clients in LobbyPMS (the API can only create_client). Update the client (holder) on a booking: name, email, phone, country, document. ${CONFIRM}`,
     inputSchema: { type: 'object', properties: { booking_id: int('Booking ID'), fields: { type: 'object', additionalProperties: true } }, required: ['booking_id', 'fields'] },
     handler: async (a, ctx) => {
       const b = await getBooking(ctx.client, a.booking_id);
@@ -281,6 +332,64 @@ export const TOOLS = [
       await runWrite(ctx.env, ctx.client, 'update_client', { ...a, client_id: b.client.client_id });
       return getBooking(ctx.client, a.booking_id);
     },
+  },
+  {
+    name: 'create_client',
+    write: true,
+    description: `Create a client in LobbyPMS (POST /customer/{1|2}). Needs document number and ISO nationality; surname required for people. Use the same document + nationality later in create_booking to attach bookings to this client. ${CONFIRM}`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['person', 'company'], description: 'Default person' },
+        document: str('ID/passport number'), nationality: str('ISO 3166-1 country code, e.g. PE, DE'),
+        name: str('First name (or company name)'), surname: str('First surname (required for person)'), second_surname: str('Second surname'),
+        document_type_id: int('From list_document_types'), birthdate: date('Birthdate'), gender: { type: 'string', enum: ['male', 'female'] },
+        phone: str('With country code, e.g. +51...'), email: str('Email'), occupation: str('Occupation'), address: str('Address'), note: str('Note'),
+      },
+      required: ['document', 'nationality', 'name'],
+    },
+    handler: async (a, ctx) => {
+      if (a.type !== 'company' && !a.surname) throw new Error('surname is required for a person');
+      if (!/^[A-Za-z]{2,3}$/.test(a.nationality || '')) throw new Error('nationality must be an ISO 3166-1 code like PE');
+      if (a.phone && !/^\+\d{6,}$/.test(String(a.phone).replace(/[\s-]/g, ''))) throw new Error('phone must include the country code, e.g. +51987654321');
+      return runWrite(ctx.env, ctx.client, 'create_client', a);
+    },
+  },
+  {
+    name: 'create_payment_link',
+    write: true,
+    description: `Create an online payment link for a booking (POST /payment/link). amount >= 6 and <= what the guest still owes; one open link per booking; needs a payment system set up in LobbyPMS. Expires in 24h unless expire_in is set. ${CONFIRM}`,
+    inputSchema: { type: 'object', properties: { booking_id: int('Booking ID'), amount: { type: 'number', description: 'Amount (property currency)' }, expire_in: date('Expiry date (optional)') }, required: ['booking_id', 'amount'] },
+    handler: async (a, ctx) => {
+      if (!(a.amount >= 6)) throw new Error('amount must be >= 6');
+      if (a.expire_in) assertYmd(a.expire_in, 'expire_in');
+      await getBooking(ctx.client, a.booking_id);
+      return runWrite(ctx.env, ctx.client, 'create_payment_link', a);
+    },
+  },
+  {
+    name: 'delete_payment_link',
+    write: true,
+    description: `Delete an OPEN payment link (DELETE /payment/link/{id}). ${CONFIRM}`,
+    inputSchema: { type: 'object', properties: { link_id: str('Payment link UUID') }, required: ['link_id'] },
+    handler: (a, ctx) => runWrite(ctx.env, ctx.client, 'delete_payment_link', a),
+  },
+  {
+    name: 'create_block',
+    write: true,
+    description: `Temporarily block rooms/beds in a category for a date range (POST /block). Held for "minutes" (default 60). Returns block ids for delete_block. ${CONFIRM}`,
+    inputSchema: { type: 'object', properties: { category_id: int('Category'), start_date: date('Start'), end_date: date('End'), number_rooms: int('Rooms/beds (default 1)'), minutes: int('Hold time in minutes (default 60)'), note: str('Note') }, required: ['category_id', 'start_date', 'end_date'] },
+    handler: (a, ctx) => {
+      assertYmd(a.start_date, 'start_date'); assertYmd(a.end_date, 'end_date');
+      return runWrite(ctx.env, ctx.client, 'create_block', a);
+    },
+  },
+  {
+    name: 'delete_block',
+    write: true,
+    description: `Remove a block made with create_block (DELETE /block/{id}). ${CONFIRM}`,
+    inputSchema: { type: 'object', properties: { block_id: int('Block id') }, required: ['block_id'] },
+    handler: (a, ctx) => runWrite(ctx.env, ctx.client, 'delete_block', a),
   },
   {
     name: 'import_hostelworld_booking',
@@ -358,13 +467,16 @@ export async function importHostelworld(a, { env, client }) {
 
   // Grouped only once group support is confirmed in the docs; otherwise linked bookings.
   const groupReady = { ok: WRITE_ENDPOINTS.create_group_booking.supported !== false && WRITE_ENDPOINTS.create_group_booking.verified };
+  const channels = (await client.get('/channels').catch(() => null))?.channels ?? [];
+  const hwChannel = channels.find((c) => /hostelworld/i.test(c.name || ''));
   const base = {
     category_id: a.category_id, start_date: a.checkin, end_date: a.checkout,
-    client: clientInfo, note, channel: 'Hostelworld', status: 'confirmada',
+    client: clientInfo, note, channel_id: hwChannel?.channel_id,
   };
   const plan = {
     mode: a.beds > 1 && groupReady.ok ? 'grouped' : (a.beds > 1 ? `${a.beds} linked bookings` : 'single'),
-    category: cat.name, nights, beds: a.beds, note, client: clientInfo, channel: 'Hostelworld',
+    category: cat.name, nights, beds: a.beds, note, client: clientInfo,
+    channel: hwChannel ? `${hwChannel.name} (id ${hwChannel.channel_id})` : 'none (no Hostelworld channel in LobbyPMS yet; ref is in the note)',
   };
 
   if (dryRun) {
